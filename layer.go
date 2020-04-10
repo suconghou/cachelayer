@@ -49,7 +49,7 @@ func (c *CacheLayer) Read(p []byte) (int, error) {
 
 // NewLayer for cache layer
 func NewLayer(target string, start int64, end int64) (*CacheLayer, int64, error) {
-	var r, size, err = pre(target, 8192, start, end)
+	var r, size, err = pre(target, 1024*1024, start, end)
 	if err != nil {
 		return nil, size, err
 	}
