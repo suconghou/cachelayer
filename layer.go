@@ -9,9 +9,14 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync"
 
 	"github.com/suconghou/cachelayer/request"
 	"github.com/suconghou/cachelayer/store"
+)
+
+var (
+	kv sync.Map
 )
 
 // CacheLayer for cache
@@ -114,77 +119,94 @@ func cacheItemParts(urlStr string, itemLen int64, from int64, to int64) ([]*cach
 		return nil, 0, err
 	}
 	var query = u.Query()
-	resp, err := request.Req(urlStr, http.MethodGet, nil, http.Header{"range": []string{"bytes=0-1"}})
+	filesize, err := getReqLen(urlStr)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-	if resp.ContentLength == 2 {
-		var (
-			filesize    int64
-			cr          = resp.Header.Get("Content-Range")
-			rangeResReg = regexp.MustCompile(`\d+/(\d+)`)
-		)
-		if rangeResReg.MatchString(cr) {
-			matches := rangeResReg.FindStringSubmatch(cr)
-			filesize, _ = strconv.ParseInt(matches[1], 10, 64)
-		}
-		if filesize <= itemLen {
-			return nil, filesize, fmt.Errorf("too small to support")
-		}
-		if to <= 0 || to >= filesize {
-			to = filesize - 1
-		}
-		if from >= filesize || from > to {
-			return nil, filesize, fmt.Errorf("error from-to")
-		}
-		var (
-			items = []*cacheItem{}
-			left  int64
-			right int64
-			start = (from / itemLen) * itemLen
-			end   = ((to / itemLen) + 1) * itemLen
-			i     = 0
-			last  bool
-		)
-		if end > filesize {
-			end = filesize
-		}
-		// start,end 是字节对齐的,end值被修正时也可能是文件大小
-		for {
-			offset := start + itemLen - 1
-			if offset >= end-1 {
-				offset = end - 1
-				last = true
-			}
-			if i == 0 {
-				left = from - start
-			} else {
-				left = 0
-			}
-			if last {
-				right = (offset - start + 1) - (end - to) + 1
-			} else {
-				right = 0
-			}
-			rr := fmt.Sprintf("%d-%d", start, offset)
-			query.Set("range", rr)
-			u.RawQuery = query.Encode()
-			items = append(items, &cacheItem{
-				u.String(),
-				left,
-				right,
-				http.Header{
-					"Range": []string{fmt.Sprintf("bytes=%s", rr)},
-				},
-			})
-			i++
-			start = offset + 1
-			if last {
-				break
-			}
-		}
-		return items, filesize, nil
+	if filesize <= itemLen {
+		return nil, filesize, fmt.Errorf("too small to support")
 	}
-	return nil, resp.ContentLength, fmt.Errorf("not support")
+	if to <= 0 || to >= filesize {
+		to = filesize - 1
+	}
+	if from >= filesize || from > to {
+		return nil, filesize, fmt.Errorf("error from-to")
+	}
+	var (
+		items = []*cacheItem{}
+		left  int64
+		right int64
+		start = (from / itemLen) * itemLen
+		end   = ((to / itemLen) + 1) * itemLen
+		i     = 0
+		last  bool
+	)
+	if end > filesize {
+		end = filesize
+	}
+	// start,end 是字节对齐的,end值被修正时也可能是文件大小
+	for {
+		offset := start + itemLen - 1
+		if offset >= end-1 {
+			offset = end - 1
+			last = true
+		}
+		if i == 0 {
+			left = from - start
+		} else {
+			left = 0
+		}
+		if last {
+			right = (offset - start + 1) - (end - to) + 1
+		} else {
+			right = 0
+		}
+		rr := fmt.Sprintf("%d-%d", start, offset)
+		query.Set("range", rr)
+		u.RawQuery = query.Encode()
+		items = append(items, &cacheItem{
+			u.String(),
+			left,
+			right,
+			http.Header{
+				"Range": []string{fmt.Sprintf("bytes=%s", rr)},
+			},
+		})
+		i++
+		start = offset + 1
+		if last {
+			break
+		}
+	}
+	return items, filesize, nil
+}
+
+func getReqLen(urlStr string) (int64, error) {
+	v, exist := kv.Load(urlStr)
+	if exist {
+		val, ok := v.(int64)
+		if !ok {
+			return 0, fmt.Errorf("cache val error")
+		}
+		return val, nil
+	}
+	resp, err := request.Req(urlStr, http.MethodGet, nil, http.Header{"range": []string{"bytes=0-1"}})
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength != 2 {
+		return resp.ContentLength, fmt.Errorf("not support")
+	}
+	var (
+		filesize    int64
+		cr          = resp.Header.Get("Content-Range")
+		rangeResReg = regexp.MustCompile(`\d+/(\d+)`)
+	)
+	if rangeResReg.MatchString(cr) {
+		matches := rangeResReg.FindStringSubmatch(cr)
+		filesize, _ = strconv.ParseInt(matches[1], 10, 64)
+	}
+	kv.Store(urlStr, filesize)
+	return filesize, nil
 }
