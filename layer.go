@@ -123,7 +123,12 @@ func cacheItemParts(urlStr string, itemLen int64, from int64, to int64) ([]*cach
 		return nil, 0, err
 	}
 	if filesize <= itemLen {
-		return nil, filesize, fmt.Errorf("too small to support")
+		return []*cacheItem{{
+			urlStr,
+			0,
+			0,
+			http.Header{},
+		}}, filesize, nil
 	}
 	if to <= 0 || to >= filesize {
 		to = filesize - 1
