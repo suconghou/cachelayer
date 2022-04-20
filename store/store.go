@@ -59,7 +59,10 @@ func Get(bucket []byte, key []byte) []byte {
 	dbInstance.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b != nil {
-			value = b.Get(key)
+			v := b.Get(key)
+			buf := make([]byte, len(v))
+			copy(buf, v)
+			value = buf
 		}
 		return nil
 	})
