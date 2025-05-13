@@ -1,4 +1,4 @@
-package cachelayer
+package layer
 
 import (
 	"bytes"
@@ -6,21 +6,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
-	"strconv"
-	"sync"
 
 	"github.com/suconghou/cachelayer/request"
 	"github.com/suconghou/cachelayer/store"
 )
 
-var (
-	kv sync.Map
-)
+type getter func(string, http.Header, *http.Client) (io.ReadCloser, int, http.Header, error)
 
 // CacheLayer for cache
 type CacheLayer struct {
 	target string
+	getter getter
 	r      io.Reader
 }
 
@@ -49,6 +45,10 @@ func (l *cacheLazyReader) Read(p []byte) (int, error) {
 
 func (c *CacheLayer) Read(p []byte) (int, error) {
 	return c.r.Read(p)
+}
+
+func NewCacheLayer(gt getter, target string, cacheKey []byte, start, end int64, reqHeaders http.Header, cli *http.Client, ll, ttl int64) (io.ReadCloser, http.Header, error) {
+
 }
 
 // NewLayer for cache layer
@@ -82,6 +82,7 @@ func newCacheReadConcater(items []*cacheItem) io.Reader {
 }
 
 func cacherequest(item *cacheItem) (io.Reader, error) {
+	// TODO 这里不是原子性， cache , fetch 两个都要原子
 	var data = store.GetCache(item.target)
 	if data == nil {
 		var res, err = request.Req(item.target, http.MethodGet, nil, item.header)
@@ -183,34 +184,4 @@ func cacheItemParts(urlStr string, itemLen int64, from int64, to int64) ([]*cach
 		}
 	}
 	return items, filesize, nil
-}
-
-func getReqLen(urlStr string) (int64, error) {
-	v, exist := kv.Load(urlStr)
-	if exist {
-		val, ok := v.(int64)
-		if !ok {
-			return 0, fmt.Errorf("cache val error")
-		}
-		return val, nil
-	}
-	resp, err := request.Req(urlStr, http.MethodGet, nil, http.Header{"range": []string{"bytes=0-1"}})
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.ContentLength != 2 {
-		return resp.ContentLength, fmt.Errorf("not support")
-	}
-	var (
-		filesize    int64
-		cr          = resp.Header.Get("Content-Range")
-		rangeResReg = regexp.MustCompile(`\d+/(\d+)`)
-	)
-	if rangeResReg.MatchString(cr) {
-		matches := rangeResReg.FindStringSubmatch(cr)
-		filesize, _ = strconv.ParseInt(matches[1], 10, 64)
-	}
-	kv.Store(urlStr, filesize)
-	return filesize, nil
 }
