@@ -9,6 +9,7 @@ import (
 
 	"github.com/tidwall/gjson"
 	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/bbolt/errors"
 )
 
 var (
@@ -129,9 +130,9 @@ func TTLSet2(b1, b2, key, value []byte, ttl int64) error {
 	})
 }
 
-func Get(b1, key []byte) []byte {
+func Get(b1, key []byte) ([]byte, error) {
 	var value []byte
-	db.View(func(tx *bolt.Tx) error {
+	var err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(b1)
 		if b == nil {
 			return nil
@@ -144,12 +145,12 @@ func Get(b1, key []byte) []byte {
 		copy(value, v)
 		return nil
 	})
-	return value
+	return value, err
 }
 
-func Get2(b1, b2, key []byte) []byte {
+func Get2(b1, b2, key []byte) ([]byte, error) {
 	var value []byte
-	db.View(func(tx *bolt.Tx) error {
+	var err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(b1)
 		if b == nil {
 			return nil
@@ -166,13 +167,17 @@ func Get2(b1, b2, key []byte) []byte {
 		copy(value, v)
 		return nil
 	})
-	return value
+	return value, err
 }
 
 func Del(b1 []byte, keys [][]byte) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		if keys == nil {
-			return tx.DeleteBucket(b1)
+			err := tx.DeleteBucket(b1)
+			if err == errors.ErrBucketNotFound {
+				err = nil
+			}
+			return err
 		}
 		b := tx.Bucket(b1)
 		if b == nil {
@@ -194,7 +199,11 @@ func Del2(b1, b2 []byte, keys [][]byte) error {
 			return nil
 		}
 		if keys == nil {
-			return b.DeleteBucket(b2)
+			err := b.DeleteBucket(b2)
+			if err == errors.ErrBucketNotFound {
+				err = nil
+			}
+			return err
 		}
 		bb := b.Bucket(b2)
 		if bb == nil {
@@ -219,7 +228,7 @@ func ForEach(b1 []byte, fn func(key, value []byte) error) error {
 	})
 }
 
-// 遍历2级bucket
+// 遍历2级bucket,fn1为第一层键值对，fn2为子bucket及其键值对，如果fn2为nil，则不遍历子bucket
 func ForEach2(b1 []byte, fn1 func(k1, v1 []byte) error, fn2 func(b2, k2, v2 []byte) error) error {
 	return db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(b1)
@@ -229,7 +238,7 @@ func ForEach2(b1 []byte, fn1 func(k1, v1 []byte) error, fn2 func(b2, k2, v2 []by
 		return b.ForEach(func(k, v []byte) error {
 			if v == nil {
 				bb := b.Bucket(k)
-				if bb == nil {
+				if bb == nil || fn2 == nil {
 					return nil
 				}
 				return bb.ForEach(func(kk, vv []byte) error {
@@ -239,6 +248,20 @@ func ForEach2(b1 []byte, fn1 func(k1, v1 []byte) error, fn2 func(b2, k2, v2 []by
 				return fn1(k, v)
 			}
 		})
+	})
+}
+
+// 原子操作更新，遍历原有数据，数据符合时更新
+func CheckForEachSet(b1 []byte, fn func(k1, v1 []byte) error, key, value []byte) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(b1)
+		if err != nil {
+			return err
+		}
+		if err = b.ForEach(fn); err != nil {
+			return err
+		}
+		return b.Put(key, value)
 	})
 }
 

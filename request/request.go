@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
+	"strconv"
 
 	"github.com/suconghou/cachelayer/layer"
 	"github.com/suconghou/cachelayer/pool"
-	"github.com/suconghou/cachelayer/ttlcache"
 	"github.com/suconghou/cachelayer/util"
 )
 
@@ -21,6 +20,7 @@ var (
 const (
 	ps = 262144
 	cr = "Content-Range"
+	cl = "Content-Length"
 	rr = "Range"
 )
 
@@ -35,54 +35,71 @@ func (b *buffer) Close() error {
 }
 
 type LockGeter struct {
-	cache *ttlcache.Cache[string, int64]
 }
 
 func NewLockGeter() *LockGeter {
-	return &LockGeter{ttlcache.NewCache[string, int64](time.Minute)}
+	return &LockGeter{}
 }
 
 // 此处我们需要确认目标是否支持range，及其大小
 func (l *LockGeter) Get(url string, reqHeaders http.Header, client *http.Client, ttl int64) (io.ReadCloser, int, http.Header, error) {
-	// TODO 缓存读取
-	// TODO 416 code
-	var cacheKey = util.Md5([]byte(url))
-	res, code, h, ll, err := part1(url, reqHeaders.Clone(), client)
+	var (
+		cacheKey     = util.Md5([]byte(url))
+		cacheKeyMeta = bytes.Join([][]byte{cacheKey, []byte("0")}, []byte(":"))
+		start, end   = util.GetRange(reqHeaders.Get(rr))
+		minfo, err   = layer.LoadMeta(cacheKeyMeta)
+	)
 	if err != nil {
-		return res, code, h, err
-	}
-	if ll < 1 || code != http.StatusPartialContent { // 不支持range，直接返回响应体
-		return res, code, h, nil
-	}
-	start, end := util.GetRange(reqHeaders.Get(rr))
-	if ll < ps { // 文件太小, 我们检查，用户是否请求了range，把内容切割出来
-		b, err := ReadBytes(res, ll)
-		if err != nil { // 读取body时发生错误，有可能超时，或者http协议不规范，响应头与响应体字节数不一致
+		res, code, h, ll, err := part1(url, reqHeaders.Clone(), client)
+		if err != nil {
+			return res, code, h, err
+		}
+		if ll < 1 || code != http.StatusPartialContent { // 不支持range，直接返回响应体
+			return res, code, h, nil
+		}
+		if ll < ps { // 文件太小, 我们检查，用户是否请求了range，把内容切割出来
+			b, err := ReadBytes(res, ll)
+			if err != nil { // 读取body时发生错误，有可能超时，或者http协议不规范，响应头与响应体字节数不一致
+				return b, code, h, err
+			}
+			if (start > 0 || end > 0) && start < ll { // 有请求range，需要切割响应体
+				if end == 0 || end >= ll {
+					end = ll - 1
+				}
+				bb := bytes.NewBuffer(b.Bytes()[start:end])
+				h.Set(cl, strconv.Itoa(bb.Len()))
+				h.Set(cr, fmt.Sprintf("bytes %d-%d/%d", start, end, ll))
+				return &buffer{bb}, code, h, nil
+			}
+			h.Set(cl, strconv.Itoa(b.Len()))
+			h.Del(cr)
+			return b, http.StatusOK, h, nil
+		}
+		// 否则，支持range，文件大小也符合
+		b, err := ReadBytes(res, ps)
+		if err != nil { // 应该读取 262144 字节，可能网络超时，或者http协议不规范，读取的响应体比预期大
 			return b, code, h, err
 		}
-		if (start > 0 || end > 0) && start < ll { // 有请求range，需要切割响应体
-			if end == 0 || end >= ll {
-				end = ll - 1
-			}
-			bb := bytes.NewBuffer(b.Bytes()[start:end])
-			h.Set(cr, fmt.Sprintf("bytes %d-%d/%d", start, end, ll))
-			return &buffer{bb}, code, h, nil
+		if err = layer.CacheSet(bytes.Join([][]byte{cacheKey, []byte("1")}, []byte(":")), b.Bytes(), ttl); err != nil {
+			return b, code, h, err // 写盘错误
 		}
-		h.Del(cr)
-		return b, http.StatusOK, h, nil
+		if minfo, err = layer.SetMeta(cacheKeyMeta, ll, h, ttl); err != nil { // 存储或序列化失败
+			return b, code, h, err
+		}
+		if start >= ll || end >= ll {
+			h.Set(cl, "0")
+			h.Del(cr)
+			return &buffer{bytes.NewBuffer([]byte(""))}, http.StatusRequestedRangeNotSatisfiable, h, nil
+		}
 	}
-	// 否则，支持range，文件大小也符合
-	b, err := ReadBytes(res, ps)
-	if err != nil { // 应该读取 262144 字节，可能网络超时，或者http协议不规范，读取的响应体比预期大
-		return b, code, h, err
+	var statusCode = http.StatusPartialContent
+	if start >= minfo.Length || end >= minfo.Length {
+		return &buffer{bytes.NewBuffer([]byte(""))}, http.StatusRequestedRangeNotSatisfiable, minfo.Header, nil
+	} else if start < 1 && end < 1 {
+		statusCode = http.StatusOK
 	}
-	layer.CacheSet(bytes.Join([][]byte{cacheKey, []byte("1")}, []byte(":")), b.Bytes(), ttl)
-	l.cache.Set(string(cacheKey), ll, time.Duration(ttl)*time.Second)
-	data, headers, err := layer.NewCacheLayer(Get, url, cacheKey, start, end, reqHeaders, client, ll, ttl)
-	if start == 0 && end == 0 {
-		code = http.StatusOK
-	}
-	return data, code, headers, err
+	data := layer.NewCacheLayer(Get, url, cacheKey, start, end, reqHeaders, client, minfo.Length, ttl)
+	return data, statusCode, minfo.Header, err
 }
 
 func Get(target string, reqHeaders http.Header, client *http.Client) (io.ReadCloser, int, http.Header, error) {
@@ -95,7 +112,7 @@ func Get(target string, reqHeaders http.Header, client *http.Client) (io.ReadClo
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode/100 != 2 {
 		resp.Body.Close()
 		return nil, resp.StatusCode, resp.Header, fmt.Errorf("%s %s : %s", resp.Request.Method, resp.Request.URL, resp.Status)
 	}

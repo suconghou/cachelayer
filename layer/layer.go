@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/suconghou/cachelayer/request"
 	"github.com/suconghou/cachelayer/store"
 )
 
@@ -15,9 +14,14 @@ type getter func(string, http.Header, *http.Client) (io.ReadCloser, int, http.He
 
 // CacheLayer for cache
 type CacheLayer struct {
-	target string
-	getter getter
-	r      io.Reader
+	target     string
+	getter     func(string, http.Header) (io.ReadCloser, int, http.Header, error)
+	cacheKey   []byte
+	start      int64
+	end        int64
+	reqHeaders http.Header
+	length     int64
+	ttl        int64
 }
 
 type cacheItem struct {
@@ -43,24 +47,38 @@ func (l *cacheLazyReader) Read(p []byte) (int, error) {
 	return l.res.Read(p)
 }
 
-func (c *CacheLayer) Read(p []byte) (int, error) {
-	return c.r.Read(p)
+// TODO
+func (l *CacheLayer) Read(p []byte) (int, error) {
+	return 0, nil
+}
+func (c *CacheLayer) Close() error {
+	// TODO
+	return nil
 }
 
-func NewCacheLayer(gt getter, target string, cacheKey []byte, start, end int64, reqHeaders http.Header, cli *http.Client, ll, ttl int64) (io.ReadCloser, http.Header, error) {
-
-}
-
-// NewLayer for cache layer
-func NewLayer(target string, start int64, end int64) (*CacheLayer, int64, error) {
-	var r, size, err = pre(target, 1024*1024, start, end)
-	if err != nil {
-		return nil, size, err
+// 传入的getter在非200区间时也自动抛出错误
+func NewCacheLayer(gt getter, target string, cacheKey []byte, start, end int64, reqHeaders http.Header, cli *http.Client, length, ttl int64) io.ReadCloser {
+	if end <= 0 || end > length-1 {
+		end = length - 1
 	}
-	return &CacheLayer{
-		target,
-		r,
-	}, size, nil
+	if start > end {
+		start = end
+	}
+	l := &CacheLayer{
+		getter:     func(s string, h http.Header) (io.ReadCloser, int, http.Header, error) { return gt(s, h, cli) },
+		target:     target,
+		cacheKey:   cacheKey,
+		start:      start,
+		end:        end,
+		reqHeaders: reqHeaders,
+		length:     length,
+		ttl:        ttl,
+	}
+	return l
+}
+
+func (c *CacheLayer) get() http.Header {
+
 }
 
 func pre(urlStr string, max int64, start int64, end int64) (io.Reader, int64, error) {
