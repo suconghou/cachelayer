@@ -49,7 +49,10 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 		cstore       = layer.NewCacheStore(cacheKey)
 		minfo, err   = layer.LoadMeta(cacheKeyMeta)
 	)
-	if err != nil {
+	if minfo == nil {
+		if err != nil {
+			return nil, 0, nil, err
+		}
 		res, code, h, ll, err := part1(url, reqHeaders.Clone(), client)
 		if err != nil {
 			return res, code, h, err
@@ -80,7 +83,7 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 		if err != nil { // 应该读取 262144 字节，可能网络超时，或者http协议不规范，读取的响应体比预期大
 			return b, code, h, err
 		}
-		if err = cstore.Set([]byte("1"), b.Bytes(), ttl); err != nil {
+		if err = cstore.Set([]byte("0"), b.Bytes(), ttl); err != nil {
 			return b, code, h, err // 写盘错误
 		}
 		if minfo, err = layer.SetMeta(cacheKeyMeta, ll, h, ttl); err != nil { // 存储或序列化失败

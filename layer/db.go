@@ -3,16 +3,15 @@ package layer
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/suconghou/cachelayer/store"
+	"github.com/suconghou/cachelayer/util"
 )
 
 var (
 	bData       = []byte("data")
 	storeHeader = []string{"Content-Type", "Accept-Ranges"}
-	errNotFound = errors.New("缓存未命中")
 )
 
 type ObjectMeta struct {
@@ -55,10 +54,12 @@ func NewCacheStore(baseKey []byte) CacheStore {
 }
 
 func CacheSet(key []byte, value []byte, ttl int64) error {
+	util.Log.Printf("set key: %s %d", key, ttl)
 	return store.TTLSet(bData, key, value, ttl)
 }
 
 func CacheGet(key []byte) ([]byte, error) {
+	util.Log.Printf("get key: %s", key)
 	return store.Get(bData, key)
 }
 
@@ -67,8 +68,8 @@ func LoadMeta(key []byte) (*ObjectMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b) < 2 {
-		return nil, errNotFound
+	if len(b) < 2 { // " {} " 是最小的有效 JSON 对象
+		return nil, nil
 	}
 	var om *ObjectMeta
 	return om, json.Unmarshal(b, &om)
