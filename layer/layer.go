@@ -220,14 +220,8 @@ func (c *cacheLayer) buildReader() (io.ReadCloser, error) {
 	return multio.FuncCloser(finalReader, multiReader.Close), nil
 }
 
-// 传入的getter在非200区间时也自动抛出错误
+// 传入的getter在非200区间时也自动抛出错误, 传入的start,end必须先修正/校验正确，start<=end , end < length ，end是0时置为length-1
 func NewCacheLayer(gt getter, target string, cstore CacheStore, start, end int64, reqHeaders http.Header, length, ttl int64) io.ReadCloser {
-	if end <= 0 || end > length-1 {
-		end = length - 1
-	}
-	if start > end {
-		start = end
-	}
 	l := &cacheLayer{
 		getter:     gt,
 		target:     target,

@@ -101,7 +101,19 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 	} else if start < 1 && end < 1 {
 		statusCode = http.StatusOK
 	}
+	if end <= 0 || end >= minfo.Length {
+		end = minfo.Length - 1
+	}
+	if start > end {
+		start = end
+	}
 	data := layer.NewCacheLayer(func(tu string, hd http.Header) (io.ReadCloser, int, http.Header, error) { return Get(tu, hd, client) }, url, cstore, start, end, reqHeaders, minfo.Length, ttl)
+	if statusCode == http.StatusOK {
+		minfo.Header.Set(cl, strconv.FormatInt(minfo.Length, 10))
+	} else {
+		minfo.Header.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		minfo.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, minfo.Length))
+	}
 	return data, statusCode, minfo.Header, err
 }
 
