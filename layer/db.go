@@ -1,8 +1,9 @@
 package layer
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 
 	"github.com/suconghou/cachelayer/store"
@@ -11,6 +12,7 @@ import (
 var (
 	bData       = []byte("data")
 	storeHeader = []string{"Content-Type", "Accept-Ranges"}
+	errNotFound = errors.New("缓存未命中")
 )
 
 type ObjectMeta struct {
@@ -18,17 +20,55 @@ type ObjectMeta struct {
 	Header http.Header `json:"header"`
 }
 
+// store 定义了缓存存储的接口
+type CacheStore interface {
+	// Set 将数据流存储到指定的 key，并设置 TTL（单位：秒）
+	Set([]byte, []byte, int64) error
+
+	// Get 从指定的 key 获取一个可读的数据流
+	// 返回的 io.ReadCloser 在读取完毕后应该被关闭
+	Get([]byte) ([]byte, error)
+
+	// Has 检查指定的 key 是否存在于缓存中
+	Has([]byte) bool
+}
+
+type kvstore struct {
+	baseKey []byte
+}
+
+func (k *kvstore) Set(key []byte, b []byte, ttl int64) error {
+	return CacheSet(bytes.Join([][]byte{k.baseKey, key}, []byte(":")), b, ttl)
+}
+
+func (k *kvstore) Get(key []byte) ([]byte, error) {
+	return CacheGet(bytes.Join([][]byte{k.baseKey, key}, []byte(":")))
+}
+
+func (k *kvstore) Has(key []byte) bool {
+	v, err := k.Get(key)
+	return err == nil && v != nil
+}
+
+func NewCacheStore(baseKey []byte) CacheStore {
+	return &kvstore{baseKey}
+}
+
 func CacheSet(key []byte, value []byte, ttl int64) error {
 	return store.TTLSet(bData, key, value, ttl)
 }
-func CacheGet(key []byte) []byte {
+
+func CacheGet(key []byte) ([]byte, error) {
 	return store.Get(bData, key)
 }
 
 func LoadMeta(key []byte) (*ObjectMeta, error) {
-	b := store.Get(bData, key)
+	b, err := store.Get(bData, key)
+	if err != nil {
+		return nil, err
+	}
 	if len(b) < 2 {
-		return nil, fmt.Errorf("meta %s not found", key)
+		return nil, errNotFound
 	}
 	var om *ObjectMeta
 	return om, json.Unmarshal(b, &om)

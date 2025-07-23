@@ -5,69 +5,224 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-
-	"github.com/suconghou/cachelayer/store"
+	"strconv"
+	"sync"
 )
 
-type getter func(string, http.Header, *http.Client) (io.ReadCloser, int, http.Header, error)
+const (
+	// ChunkSize 定义了缓存分片的细粒度大小，固定大小 256KB
+	ChunkSize = 256 * 1024
+)
 
-// CacheLayer for cache
-type CacheLayer struct {
+// getter 是执行实际HTTP请求的函数签名
+type getter func(string, http.Header) (io.ReadCloser, int, http.Header, error)
+
+// cacheLayer 实现了 io.ReadCloser 接口
+type cacheLayer struct {
 	target     string
-	getter     func(string, http.Header) (io.ReadCloser, int, http.Header, error)
-	cacheKey   []byte
+	getter     getter
+	store      CacheStore // 用于生成分片缓存键的基础Key
 	start      int64
 	end        int64
 	reqHeaders http.Header
 	length     int64
 	ttl        int64
+
+	reader io.Reader // 内部使用的拼接读取器
+	once   sync.Once // 保证读取器只构建一次
+	err    error     // 存储构建读取器时发生的错误
 }
 
-type cacheItem struct {
-	target string
-	left   int64
-	right  int64
-	header http.Header
+type cacheKVItem struct {
+	load   func() (io.Reader, error)
+	reader io.Reader // 内部使用的拼接读取器
+	once   sync.Once // 保证读取器只构建一次
+	err    error     // 存储构建读取器时发生的错误
 }
 
-type cacheLazyReader struct {
-	r   *cacheItem
-	res io.Reader
-}
-
-func (l *cacheLazyReader) Read(p []byte) (int, error) {
-	if l.res == nil {
-		res, err := cacherequest(l.r)
-		if err != nil {
-			return 0, err
-		}
-		l.res = res
+func (c *cacheKVItem) Read(p []byte) (int, error) {
+	c.once.Do(func() {
+		c.reader, c.err = c.load()
+	})
+	if c.err != nil {
+		return 0, c.err
 	}
-	return l.res.Read(p)
+	return c.reader.Read(p)
 }
 
-// TODO
-func (l *CacheLayer) Read(p []byte) (int, error) {
-	return 0, nil
+// lazyDownloader 是一个下载任务的占位符，实现了 io.Reader
+type lazyDownloader struct {
+	layer     *cacheLayer // 引用父级以访问 getter, storage 等
+	startByte int64
+	endByte   int64
+
+	reader io.ReadCloser // 实际的下载通道 (cachingTeeReader)
+	once   sync.Once
+	err    error
 }
-func (c *CacheLayer) Close() error {
-	// TODO
+
+// Read 在首次被调用时，才真正触发下载
+func (l *lazyDownloader) Read(p []byte) (int, error) {
+	l.once.Do(func() {
+		// 1. 准备 HTTP 请求
+		headers := l.layer.reqHeaders.Clone()
+		headers.Set("Range", fmt.Sprintf("bytes=%d-%d", l.startByte, l.endByte))
+		// 2. 执行下载
+		res, statusCode, _, err := l.layer.getter(l.layer.target, headers)
+		if err != nil {
+			l.err = err
+			return
+		}
+		if statusCode != http.StatusOK && statusCode != http.StatusPartialContent {
+			l.err = fmt.Errorf("bad status code: %d", statusCode)
+			res.Close()
+			return
+		}
+		// 3. 将响应体包装成 cachingTeeReader
+		l.reader = &cachingTeeReader{
+			source:            res,
+			store:             l.layer.store,
+			ttl:               l.layer.ttl,
+			currentChunkIndex: l.startByte / ChunkSize, // 计算起始分片索引
+			buffer:            new(bytes.Buffer),
+		}
+	})
+	if l.err != nil {
+		return 0, l.err
+	}
+	return l.reader.Read(p)
+}
+
+// Close 确保底层的 reader 被关闭
+func (l *lazyDownloader) Close() error {
+	if l.reader != nil {
+		return l.reader.Close()
+	}
 	return nil
 }
 
+// cachingTeeReader 是 "边下边存" 的智能通道，实现了 io.ReadCloser
+type cachingTeeReader struct {
+	source io.ReadCloser // 原始 HTTP 响应体
+	store  CacheStore
+	ttl    int64
+
+	currentChunkIndex int64         // 当前正在填充的分片索引
+	buffer            *bytes.Buffer // 当前分片的缓冲
+}
+
+func (r *cachingTeeReader) Read(p []byte) (n int, err error) {
+	// 从原始数据源读取
+	n, err = r.source.Read(p)
+	if n > 0 {
+		// Tee: 将读到的数据也写入我们自己的缓冲
+		r.buffer.Write(p[:n])
+		// 检查缓冲是否达到了一个或多个分片的大小
+		for r.buffer.Len() >= ChunkSize {
+			chunkData := r.buffer.Next(ChunkSize)
+			// 存储完整的分片
+			chunkKey := []byte(strconv.FormatInt(r.currentChunkIndex, 10))
+			_ = r.store.Set(chunkKey, chunkData, r.ttl)
+			// 移至下一个分片
+			r.currentChunkIndex++
+		}
+	}
+	// 如果读取结束 (io.EOF)，将缓冲区里剩余的不足一个分片的数据也存起来
+	if err == io.EOF {
+		r.Close()
+	}
+	return n, err
+}
+
+func (r *cachingTeeReader) Close() error {
+	// 冲洗(Flush)最后一个不完整的分片
+	if r.buffer.Len() > 0 {
+		chunkKey := []byte(strconv.FormatInt(r.currentChunkIndex, 10))
+		// 这里不需要复制，因为是最后一次写入
+		_ = r.store.Set(chunkKey, r.buffer.Bytes(), r.ttl)
+	}
+	return r.source.Close()
+}
+
+func (c *cacheLayer) Read(p []byte) (int, error) {
+	c.once.Do(func() { // 使用 sync.Once 确保 buildReader 方法只被执行一次
+		c.reader, c.err = c.buildReader()
+	})
+	if c.err != nil {
+		return 0, c.err
+	}
+	return c.reader.Read(p)
+}
+
+func (c *cacheLayer) Close() error {
+	// 如果 reader 实现了 io.Closer，可以尝试关闭
+	if closer, ok := c.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func (c *cacheLayer) buildReader() (io.Reader, error) {
+	var readers []io.Reader
+	startChunk := c.start / ChunkSize
+	endChunk := c.end / ChunkSize
+	// 遍历所有需要的分片
+	for i := startChunk; i <= endChunk; {
+		chunkKey := []byte(strconv.FormatInt(i, 10))
+		if c.store.Has(chunkKey) {
+			readers = append(readers, &cacheKVItem{load: func() (io.Reader, error) {
+				b, err := c.store.Get(chunkKey)
+				return bytes.NewReader(b), err
+			}})
+			i++
+		} else {
+			missingEndChunk := i
+			for j := i + 1; j <= endChunk; j++ {
+				chunkKey = []byte(strconv.FormatInt(j, 10))
+				if c.store.Has(chunkKey) {
+					break
+				}
+				missingEndChunk = j
+			}
+			downloadStart := i * ChunkSize
+			downloadEnd := (missingEndChunk+1)*ChunkSize - 1
+			if downloadEnd >= c.length {
+				downloadEnd = c.length - 1
+			}
+			downloader := &lazyDownloader{
+				layer:     c, // 传递对 cacheLayer 的引用
+				startByte: downloadStart,
+				endByte:   downloadEnd,
+			}
+			readers = append(readers, downloader)
+			// 跳过整个缺失的区块
+			i = missingEndChunk + 1
+		}
+	}
+	multiReader := io.MultiReader(readers...)
+	startOffsetInChunk := c.start % ChunkSize
+	if startOffsetInChunk > 0 {
+		if _, err := io.CopyN(io.Discard, multiReader, startOffsetInChunk); err != nil {
+			return nil, fmt.Errorf("failed to seek to start offset: %w", err)
+		}
+	}
+	totalReadSize := c.end - c.start + 1
+	finalReader := io.LimitReader(multiReader, totalReadSize)
+	return finalReader, nil
+}
+
 // 传入的getter在非200区间时也自动抛出错误
-func NewCacheLayer(gt getter, target string, cacheKey []byte, start, end int64, reqHeaders http.Header, cli *http.Client, length, ttl int64) io.ReadCloser {
+func NewCacheLayer(gt getter, target string, cstore CacheStore, start, end int64, reqHeaders http.Header, length, ttl int64) io.ReadCloser {
 	if end <= 0 || end > length-1 {
 		end = length - 1
 	}
 	if start > end {
 		start = end
 	}
-	l := &CacheLayer{
-		getter:     func(s string, h http.Header) (io.ReadCloser, int, http.Header, error) { return gt(s, h, cli) },
+	l := &cacheLayer{
+		getter:     gt,
 		target:     target,
-		cacheKey:   cacheKey,
+		store:      cstore,
 		start:      start,
 		end:        end,
 		reqHeaders: reqHeaders,
@@ -75,131 +230,4 @@ func NewCacheLayer(gt getter, target string, cacheKey []byte, start, end int64, 
 		ttl:        ttl,
 	}
 	return l
-}
-
-func (c *CacheLayer) get() http.Header {
-
-}
-
-func pre(urlStr string, max int64, start int64, end int64) (io.Reader, int64, error) {
-	var parts, size, err = cacheItemParts(urlStr, max, start, end)
-	if err != nil {
-		return nil, size, err
-	}
-	return newCacheReadConcater(parts), size, nil
-}
-
-func newCacheReadConcater(items []*cacheItem) io.Reader {
-	var buffers = []io.Reader{}
-	for _, t := range items {
-		buffers = append(buffers, &cacheLazyReader{
-			r: t,
-		})
-	}
-	return io.MultiReader(buffers...)
-}
-
-func cacherequest(item *cacheItem) (io.Reader, error) {
-	// TODO 这里不是原子性， cache , fetch 两个都要原子
-	var data = store.GetCache(item.target)
-	if data == nil {
-		var res, err = request.Req(item.target, http.MethodGet, nil, item.header)
-		if err != nil {
-			return nil, err
-		}
-		defer res.Body.Close()
-		data, err = io.ReadAll(res.Body)
-		if err != nil {
-			return nil, err
-		}
-		if err = store.SetCache(item.target, data); err != nil {
-			return nil, err
-		}
-	}
-	var bs []byte
-	if item.left > 0 && item.right > 0 {
-		bs = data[item.left:item.right]
-	} else if item.left > 0 {
-		bs = data[item.left:]
-	} else if item.right > 0 {
-		bs = data[:item.right]
-	} else {
-		bs = data
-	}
-	return bytes.NewReader(bs), nil
-}
-
-// from , to 根据请求range解析得来,按照range规范,按照规范,浏览器发出的to值,最大应为size-1
-// 对客户端的响应大小应为 to-from+1
-func cacheItemParts(urlStr string, itemLen int64, from int64, to int64) ([]*cacheItem, int64, error) {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, 0, err
-	}
-	var query = u.Query()
-	filesize, err := getReqLen(urlStr)
-	if err != nil {
-		return nil, 0, err
-	}
-	if filesize <= itemLen {
-		return []*cacheItem{{
-			urlStr,
-			0,
-			0,
-			http.Header{},
-		}}, filesize, nil
-	}
-	if to <= 0 || to >= filesize {
-		to = filesize - 1
-	}
-	if from >= filesize || from > to {
-		return nil, filesize, fmt.Errorf("error from-to")
-	}
-	var (
-		items = []*cacheItem{}
-		left  int64
-		right int64
-		start = (from / itemLen) * itemLen
-		end   = ((to / itemLen) + 1) * itemLen
-		i     = 0
-		last  bool
-	)
-	if end > filesize {
-		end = filesize
-	}
-	// start,end 是字节对齐的,end值被修正时也可能是文件大小
-	for {
-		offset := start + itemLen - 1
-		if offset >= end-1 {
-			offset = end - 1
-			last = true
-		}
-		if i == 0 {
-			left = from - start
-		} else {
-			left = 0
-		}
-		if last {
-			right = (offset - start + 1) - (end - to) + 1
-		} else {
-			right = 0
-		}
-		rr := fmt.Sprintf("%d-%d", start, offset)
-		query.Set("range", rr)
-		u.RawQuery = query.Encode()
-		items = append(items, &cacheItem{
-			u.String(),
-			left,
-			right,
-			http.Header{
-				"Range": []string{fmt.Sprintf("bytes=%s", rr)},
-			},
-		})
-		i++
-		start = offset + 1
-		if last {
-			break
-		}
-	}
-	return items, filesize, nil
 }

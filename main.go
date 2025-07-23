@@ -25,7 +25,6 @@ func main() {
 		cache = flag.String("f", "cache.db", "cache file")
 	)
 	flag.Parse()
-	util.TimerInit()
 	if err := store.Init(*cache); err != nil {
 		util.Log.Fatal(err)
 	}
