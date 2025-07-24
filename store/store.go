@@ -3,13 +3,14 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/suconghou/cachelayer/util"
 
 	"github.com/tidwall/gjson"
 	bolt "go.etcd.io/bbolt"
-	"go.etcd.io/bbolt/errors"
+	dberr "go.etcd.io/bbolt/errors"
 )
 
 var (
@@ -254,7 +255,7 @@ func Del(b1 []byte, keys [][]byte) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		if keys == nil {
 			err := tx.DeleteBucket(b1)
-			if err == errors.ErrBucketNotFound {
+			if err == dberr.ErrBucketNotFound {
 				err = nil
 			}
 			return err
@@ -280,7 +281,7 @@ func Del2(b1, b2 []byte, keys [][]byte) error {
 		}
 		if keys == nil {
 			err := b.DeleteBucket(b2)
-			if err == errors.ErrBucketNotFound {
+			if err == dberr.ErrBucketNotFound {
 				err = nil
 			}
 			return err
@@ -376,15 +377,20 @@ func Expire() error {
 		return err
 	}
 	return db.Update(func(tx *bolt.Tx) error {
+		var errs []error
 		for _, j := range expiredDataInfo {
 			if len(j) == 3 { // 1-level bucket
 				if b := tx.Bucket([]byte(j[1].Str)); b != nil {
-					b.Delete([]byte(j[2].Str)) // 忽略错误，如果key不存在也没关系
+					if err = b.Delete([]byte(j[2].Str)); err != nil {
+						errs = append(errs, err)
+					}
 				}
 			} else if len(j) == 4 { // 2-level bucket
 				if b := tx.Bucket([]byte(j[1].Str)); b != nil {
 					if bb := b.Bucket([]byte(j[2].Str)); bb != nil {
-						bb.Delete([]byte(j[3].Str))
+						if err = bb.Delete([]byte(j[3].Str)); err != nil {
+							errs = append(errs, err)
+						}
 					}
 				}
 			}
@@ -392,9 +398,11 @@ func Expire() error {
 		// 删除所有对应的 TTL 条目
 		if b := tx.Bucket(bTTL); b != nil {
 			for _, k := range ttlKeysToDelete {
-				b.Delete(k)
+				if err = b.Delete(k); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
-		return nil
+		return errors.Join(errs...)
 	})
 }

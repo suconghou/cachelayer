@@ -24,7 +24,7 @@ type getter func(string, http.Header) (io.ReadCloser, int, http.Header, error)
 type cacheLayer struct {
 	target     string
 	getter     getter
-	store      CacheStore // 用于生成分片缓存键的基础Key
+	store      CacheStore
 	start      int64
 	end        int64
 	reqHeaders http.Header
@@ -67,27 +67,23 @@ type lazyDownloader struct {
 // Read 在首次被调用时，才真正触发下载
 func (l *lazyDownloader) Read(p []byte) (int, error) {
 	l.once.Do(func() {
-		// 1. 准备 HTTP 请求
 		headers := l.layer.reqHeaders.Clone()
 		headers.Set("Range", fmt.Sprintf("bytes=%d-%d", l.startByte, l.endByte))
-		// 2. 执行下载
-		res, statusCode, _, err := l.layer.getter(l.layer.target, headers)
+		res, _, _, err := l.layer.getter(l.layer.target, headers) // 如果statusCode非200区间，则err有值
 		if err != nil {
 			l.err = err
+			if res != nil {
+				res.Close()
+			}
 			return
 		}
-		if statusCode != http.StatusOK && statusCode != http.StatusPartialContent {
-			l.err = fmt.Errorf("bad status code: %d", statusCode)
-			res.Close()
-			return
-		}
-		// 3. 将响应体包装成 cachingTeeReader
 		l.reader = &cachingTeeReader{
 			source:            res,
 			store:             l.layer.store,
 			ttl:               l.layer.ttl,
 			currentChunkIndex: l.startByte / ChunkSize, // 计算起始分片索引
-			buffer:            new(bytes.Buffer),
+			buffer:            util.BufferPool.Get(1 << 20),
+			expectedSize:      l.endByte - l.startByte + 1,
 		}
 	})
 	if l.err != nil {
@@ -112,38 +108,40 @@ type cachingTeeReader struct {
 
 	currentChunkIndex int64         // 当前正在填充的分片索引
 	buffer            *bytes.Buffer // 当前分片的缓冲
+	sourceEOF         bool          // 标记底层数据流是否已结束
+	bytesRead         int64         // 已读取的字节数
+	expectedSize      int64         // 预期需要读取的总字节数
 }
 
 func (r *cachingTeeReader) Read(p []byte) (n int, err error) {
-	// 从原始数据源读取
 	n, err = r.source.Read(p)
 	if n > 0 {
-		// Tee: 将读到的数据也写入我们自己的缓冲
-		r.buffer.Write(p[:n])
-		// 检查缓冲是否达到了一个或多个分片的大小
-		for r.buffer.Len() >= ChunkSize {
-			chunkData := r.buffer.Next(ChunkSize)
-			// 存储完整的分片
-			chunkKey := []byte(strconv.FormatInt(r.currentChunkIndex, 10))
-			if err = r.store.Set(chunkKey, chunkData, r.ttl); err != nil {
+		r.bytesRead += int64(n)
+		r.buffer.Write(p[:n])             // Tee: 将读到的数据也写入我们自己的缓冲
+		for r.buffer.Len() >= ChunkSize { // 检查缓冲是否达到了一个或多个分片的大小
+			chunkData := r.buffer.Next(ChunkSize) // 存储完整的分片
+			if err = r.store.Set([]byte(strconv.FormatInt(r.currentChunkIndex, 10)), chunkData, r.ttl); err != nil {
 				util.Log.Print(err)
 			}
-			// 移至下一个分片
-			r.currentChunkIndex++
+			r.currentChunkIndex++ // 移至下一个分片
 		}
+	}
+	if err == io.EOF || (r.expectedSize > 0 && r.bytesRead >= r.expectedSize) {
+		r.sourceEOF = true
 	}
 	return n, err
 }
 
 func (r *cachingTeeReader) Close() error {
-	// 冲洗(Flush)最后一个不完整的分片
-	if r.buffer.Len() > 0 {
-		chunkKey := []byte(strconv.FormatInt(r.currentChunkIndex, 10))
-		// 这里不需要复制，因为是最后一次写入
-		if err := r.store.Set(chunkKey, r.buffer.Bytes(), r.ttl); err != nil {
+	// 只有当底层数据流被完全读完 (sourceEOF为true) 并且缓冲区还有剩余数据时，
+	// 才认为这是文件的最后一个、不完整的分片，并将其存入缓存。
+	if r.sourceEOF && r.buffer.Len() > 0 {
+		if err := r.store.Set([]byte(strconv.FormatInt(r.currentChunkIndex, 10)), r.buffer.Bytes(), r.ttl); err != nil {
 			util.Log.Print(err)
 		}
 	}
+	r.buffer.Reset()
+	util.BufferPool.Put(r.buffer)
 	return r.source.Close()
 }
 
@@ -170,26 +168,21 @@ func (c *cacheLayer) buildReader() (io.ReadCloser, error) {
 		startChunk = c.start / ChunkSize
 		endChunk   = c.end / ChunkSize
 	)
-	util.Log.Printf("%d-%d %d-%d", c.start, c.end, startChunk, endChunk)
-	// 遍历所有需要的分片
-	for i := startChunk; i <= endChunk; {
+	for i := startChunk; i <= endChunk; { // 遍历所有需要的分片
 		chunkKey := []byte(strconv.FormatInt(i, 10))
-		if c.store.Has(chunkKey) {
-			util.Log.Printf("缓存命中 chunkKey: %d", i)
+		if c.store.Has(chunkKey, c.ttl) {
 			readers = append(readers, &cacheKVItem{load: func() (io.Reader, error) {
 				b, err := c.store.Get(chunkKey)
 				return bytes.NewReader(b), err
 			}})
 			i++
 		} else {
-			util.Log.Printf("无缓存 chunkKey: %d", i)
 			missingEndChunk := i
 			for j := i + 1; j <= endChunk; j++ {
 				chunkKey = []byte(strconv.FormatInt(j, 10))
-				if c.store.Has(chunkKey) {
+				if c.store.Has(chunkKey, c.ttl) {
 					break
 				}
-				util.Log.Printf("无缓存 chunkKey: %d", j)
 				missingEndChunk = j
 			}
 			downloadStart := i * ChunkSize
@@ -202,17 +195,15 @@ func (c *cacheLayer) buildReader() (io.ReadCloser, error) {
 				startByte: downloadStart,
 				endByte:   downloadEnd,
 			}
-			util.Log.Printf("下载 lazyDownloader chunkKey: %d-%d", downloadStart, downloadEnd)
 			readers = append(readers, downloader)
-			// 跳过整个缺失的区块
-			i = missingEndChunk + 1
+			i = missingEndChunk + 1 // 跳过整个缺失的区块
 		}
 	}
 	multiReader := multio.MultiReadReader(readers...)
-	startOffsetInChunk := c.start % ChunkSize
+	startOffsetInChunk := c.start - (startChunk * ChunkSize)
 	if startOffsetInChunk > 0 {
 		if _, err := io.CopyN(io.Discard, multiReader, startOffsetInChunk); err != nil {
-			return nil, fmt.Errorf("failed to seek to start offset: %w", err)
+			return nil, err
 		}
 	}
 	totalReadSize := c.end - c.start + 1

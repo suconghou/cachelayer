@@ -8,12 +8,10 @@ import (
 	"strconv"
 
 	"github.com/suconghou/cachelayer/layer"
-	"github.com/suconghou/cachelayer/pool"
 	"github.com/suconghou/cachelayer/util"
 )
 
 var (
-	bufferPool   = pool.NewBufferPool(1<<20, 8<<20)
 	HttpProvider = newHttpGeter()
 )
 
@@ -29,7 +27,7 @@ type buffer struct {
 
 func (b *buffer) Close() error {
 	b.Reset()
-	bufferPool.Put(b.Buffer)
+	util.BufferPool.Put(b.Buffer)
 	return nil
 }
 
@@ -111,8 +109,8 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 	if statusCode == http.StatusOK {
 		minfo.Header.Set(cl, strconv.FormatInt(minfo.Length, 10))
 	} else {
-		minfo.Header.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-		minfo.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, minfo.Length))
+		minfo.Header.Set(cl, strconv.FormatInt(end-start+1, 10))
+		minfo.Header.Set(cr, fmt.Sprintf("bytes %d-%d/%d", start, end, minfo.Length))
 	}
 	return data, statusCode, minfo.Header, err
 }
@@ -145,12 +143,12 @@ func GetBytes(target string, reqHeaders http.Header, client *http.Client, max in
 }
 
 func ReadBytes(r io.ReadCloser, max int64) (*buffer, error) {
-	var buf = bufferPool.Get(1 << 20)
+	var buf = util.BufferPool.Get(1 << 20)
 	buf.Reset()
 	defer r.Close()
 	if _, err := buf.ReadFrom(http.MaxBytesReader(nil, r, max)); err != nil {
 		buf.Reset()
-		bufferPool.Put(buf)
+		util.BufferPool.Put(buf)
 		return nil, err
 	}
 	return &buffer{buf}, nil

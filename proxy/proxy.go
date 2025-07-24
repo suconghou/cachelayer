@@ -27,6 +27,7 @@ var (
 		"Cookie",
 		"Range",
 		"Referer",
+		"Origin",
 	}
 )
 

@@ -76,7 +76,7 @@ func tryFiles(files []string, w http.ResponseWriter, r *http.Request) bool {
 }
 
 func signalListen(cfile string) {
-	tick := time.NewTicker(time.Minute)
+	tick := time.NewTicker(time.Minute * 5)
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGUSR1, syscall.SIGUSR2)
 	c <- syscall.SIGUSR1

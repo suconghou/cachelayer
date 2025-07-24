@@ -10,18 +10,21 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/suconghou/cachelayer/pool"
 )
 
 var (
 	// Log print to stdout
 	Log = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
 	// 此值，别处需要只读，只在此处修改
-	tt   time.Time
-	T    int64 // 时间戳毫秒值， 我们有一个地方总体维护时间戳，对精度要求不高的可以使用这个，减少系统调用
-	NOW  int64 // 转化为秒级时间戳，只需要秒级精度的可以使用这个
-	tick = make(chan int64, 5)
-	cr   = regexp.MustCompile(`\d+/(\d+)`)
-	rq   = regexp.MustCompile(`(\d+)-(\d+)?$`)
+	tt         time.Time
+	T          int64 // 时间戳毫秒值， 我们有一个地方总体维护时间戳，对精度要求不高的可以使用这个，减少系统调用
+	NOW        int64 // 转化为秒级时间戳，只需要秒级精度的可以使用这个
+	tick       = make(chan int64, 5)
+	cr         = regexp.MustCompile(`\d+/(\d+)`)
+	rq         = regexp.MustCompile(`(\d+)-(\d+)?$`)
+	BufferPool = pool.NewBufferPool(1<<20, 8<<20)
 )
 
 // JSONPut resp json
