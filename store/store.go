@@ -170,6 +170,86 @@ func Get2(b1, b2, key []byte) ([]byte, error) {
 	return value, err
 }
 
+// Exists 纯粹地检查一个 key 是否存在，这是一个高效的只读操作。
+func Exists(b1, key []byte) (bool, error) {
+	var exist = false
+	err := db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(b1); b != nil {
+			exist = b.Get(key) != nil
+		}
+		return nil
+	})
+	return exist, err
+}
+
+// Exists2 对应嵌套 bucket 的只读存在性检查
+func Exists2(b1, b2, key []byte) (bool, error) {
+	var exist = false
+	err := db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(b1); b != nil {
+			if bb := b.Bucket(b2); bb != nil {
+				exist = bb.Get(key) != nil
+			}
+		}
+		return nil
+	})
+	return exist, err
+}
+
+// Touch 检查一个 key 是否存在。如果存在且 ttl > 0，则更新其有效期。
+// 如果 ttl <= 0，则该函数行为等同于 Exists，是一个只读操作。
+func Touch(b1, key []byte, ttl int64) (bool, error) {
+	if ttl <= 0 {
+		return Exists(b1, key)
+	}
+	var exist = false
+	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(key)})
+	if err != nil {
+		return exist, err
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(b1); b != nil {
+			exist = b.Get(key) != nil
+		}
+		if !exist {
+			return nil
+		}
+		bt, err := tx.CreateBucketIfNotExists(bTTL)
+		if err != nil {
+			return err
+		}
+		return bt.Put(bytes.Join([][]byte{b1, key}, []byte(":")), tt)
+	})
+	return exist, err
+}
+
+func Touch2(b1, b2, key []byte, ttl int64) (bool, error) {
+	if ttl <= 0 {
+		return Exists2(b1, b2, key)
+	}
+	var exist = false
+	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(b2), string(key)})
+	if err != nil {
+		return exist, err
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(b1); b != nil {
+			if bb := b.Bucket(b2); bb != nil {
+				exist = bb.Get(key) != nil
+			}
+		}
+		if !exist {
+			return nil
+		}
+		bt, err := tx.CreateBucketIfNotExists(bTTL)
+		if err != nil {
+			return err
+		}
+		return bt.Put(bytes.Join([][]byte{b1, b2, key}, []byte(":")), tt)
+	})
+	return exist, err
+}
+
 func Del(b1 []byte, keys [][]byte) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		if keys == nil {
@@ -267,13 +347,13 @@ func CheckForEachSet(b1 []byte, fn func(k1, v1 []byte) error, key, value []byte)
 
 func Expire() error {
 	var (
-		t        = util.NOW
-		keys     = [][]byte{}
-		toDelete = make([][]gjson.Result, 0)
-		addKeys  = func(k []byte) {
+		t               = util.NOW
+		ttlKeysToDelete = [][]byte{}
+		expiredDataInfo = make([][]gjson.Result, 0)
+		addKeys         = func(k []byte) {
 			key := make([]byte, len(k))
 			copy(key, k)
-			keys = append(keys, key)
+			ttlKeysToDelete = append(ttlKeysToDelete, key)
 		}
 		iterate = func(k, v []byte) error {
 			j := gjson.ParseBytes(v).Array()
@@ -287,24 +367,34 @@ func Expire() error {
 				return nil
 			}
 			addKeys(k)
-			toDelete = append(toDelete, j)
+			expiredDataInfo = append(expiredDataInfo, j)
 			return nil
 		}
 	)
 	err := ForEach(bTTL, iterate)
-	if err != nil {
+	if err != nil || len(ttlKeysToDelete) == 0 {
 		return err
 	}
-	for _, j := range toDelete {
-		if len(j) == 3 {
-			if err = Del([]byte(j[1].Str), [][]byte{[]byte(j[2].Str)}); err != nil {
-				return err
-			}
-		} else {
-			if err = Del2([]byte(j[1].Str), []byte(j[2].Str), [][]byte{[]byte(j[3].Str)}); err != nil {
-				return err
+	return db.Update(func(tx *bolt.Tx) error {
+		for _, j := range expiredDataInfo {
+			if len(j) == 3 { // 1-level bucket
+				if b := tx.Bucket([]byte(j[1].Str)); b != nil {
+					b.Delete([]byte(j[2].Str)) // 忽略错误，如果key不存在也没关系
+				}
+			} else if len(j) == 4 { // 2-level bucket
+				if b := tx.Bucket([]byte(j[1].Str)); b != nil {
+					if bb := b.Bucket([]byte(j[2].Str)); bb != nil {
+						bb.Delete([]byte(j[3].Str))
+					}
+				}
 			}
 		}
-	}
-	return Del(bTTL, keys)
+		// 删除所有对应的 TTL 条目
+		if b := tx.Bucket(bTTL); b != nil {
+			for _, k := range ttlKeysToDelete {
+				b.Delete(k)
+			}
+		}
+		return nil
+	})
 }
