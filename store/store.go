@@ -6,8 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/suconghou/cachelayer/util"
-
 	"github.com/tidwall/gjson"
 	bolt "go.etcd.io/bbolt"
 	dberr "go.etcd.io/bbolt/errors"
@@ -66,7 +64,7 @@ func TTLSet(b1, key, value []byte, ttl int64) error {
 			return bb.Delete(bytes.Join([][]byte{b1, key}, []byte(":")))
 		})
 	}
-	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(key)})
+	tt, err := json.Marshal([]any{time.Now().Unix() + ttl, string(b1), string(key)})
 	if err != nil {
 		return err
 	}
@@ -107,7 +105,7 @@ func TTLSet2(b1, b2, key, value []byte, ttl int64) error {
 			return bbb.Delete(bytes.Join([][]byte{b1, b2, key}, []byte(":")))
 		})
 	}
-	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(b2), string(key)})
+	tt, err := json.Marshal([]any{time.Now().Unix() + ttl, string(b1), string(b2), string(key)})
 	if err != nil {
 		return err
 	}
@@ -204,7 +202,7 @@ func Touch(b1, key []byte, ttl int64) (bool, error) {
 		return Exists(b1, key)
 	}
 	var exist = false
-	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(key)})
+	tt, err := json.Marshal([]any{time.Now().Unix() + ttl, string(b1), string(key)})
 	if err != nil {
 		return exist, err
 	}
@@ -229,7 +227,7 @@ func Touch2(b1, b2, key []byte, ttl int64) (bool, error) {
 		return Exists2(b1, b2, key)
 	}
 	var exist = false
-	tt, err := json.Marshal([]any{util.NOW + ttl, string(b1), string(b2), string(key)})
+	tt, err := json.Marshal([]any{time.Now().Unix() + ttl, string(b1), string(b2), string(key)})
 	if err != nil {
 		return exist, err
 	}
@@ -348,7 +346,7 @@ func CheckForEachSet(b1 []byte, fn func(k1, v1 []byte) error, key, value []byte)
 
 func Expire() error {
 	var (
-		t               = util.NOW
+		t               = time.Now().Unix()
 		ttlKeysToDelete = [][]byte{}
 		expiredDataInfo = make([][]gjson.Result, 0)
 		addKeys         = func(k []byte) {
