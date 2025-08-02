@@ -67,7 +67,7 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 				if end == 0 || end >= ll {
 					end = ll - 1
 				}
-				bb := bytes.NewBuffer(b.Bytes()[start:end])
+				bb := bytes.NewBuffer(b.Bytes()[start : end+1])
 				h.Set(cl, strconv.Itoa(bb.Len()))
 				h.Set(cr, fmt.Sprintf("bytes %d-%d/%d", start, end, ll))
 				return &buffer{bb}, code, h, nil

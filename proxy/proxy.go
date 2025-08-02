@@ -53,9 +53,6 @@ func Do(w http.ResponseWriter, r *http.Request, match []string) error {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return err
 	}
-	if r.Method != http.MethodGet {
-		return nil
-	}
 	to := w.Header()
 	copyHeader(headers, to, exposeHeaders)
 	w.WriteHeader(statusCode)

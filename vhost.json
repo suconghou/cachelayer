@@ -1,0 +1,16 @@
+[
+	{
+		"prefix": "/aa/",
+		"target": "http://domain-aa.com",
+		"withQuery": true,
+		"strictCache": true,
+		"cachesec": 120
+	},
+	{
+		"prefix": "/bb",
+		"target": "http://domain-bb.com",
+		"withQuery": true,
+		"strictCache": true,
+		"cachesec": 90
+	}
+]
