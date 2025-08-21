@@ -2,6 +2,7 @@ package request
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,8 +127,7 @@ func Get(target string, reqHeaders http.Header, client *http.Client) (io.ReadClo
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		resp.Body.Close()
-		return nil, resp.StatusCode, resp.Header, fmt.Errorf("%s %s : %s", resp.Request.Method, resp.Request.URL, resp.Status)
+		return nil, resp.StatusCode, resp.Header, errors.Join(resp.Body.Close(), fmt.Errorf("%s %s : %s", resp.Request.Method, resp.Request.URL, resp.Status))
 	}
 	return resp.Body, resp.StatusCode, resp.Header, nil
 }
