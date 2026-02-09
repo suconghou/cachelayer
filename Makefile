@@ -3,9 +3,9 @@ dev:
 
 
 build:
-	docker build -t=registry.cn-beijing.aliyuncs.com/suconghou/tools:gateway .
+	docker build -t=suconghou/tools:cachelayer .
 
 docker:
 	make build && \
 	docker images && \
-	docker push registry.cn-beijing.aliyuncs.com/suconghou/tools:gateway
+	docker push suconghou/tools:cachelayer
