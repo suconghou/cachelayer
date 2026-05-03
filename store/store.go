@@ -344,6 +344,19 @@ func CheckForEachSet(b1 []byte, fn func(k1, v1 []byte) error, key, value []byte)
 	})
 }
 
+// 注意返回的T，error可能都是nil，调用者需判断
+func GetObject[T any](b1, key []byte) (T, error) {
+	var v T
+	bs, err := Get(b1, key)
+	if err != nil {
+		return v, err
+	}
+	if len(bs) < 2 {
+		return v, nil
+	}
+	return v, json.Unmarshal(bs, &v)
+}
+
 func Expire() error {
 	var (
 		t               = time.Now().Unix()

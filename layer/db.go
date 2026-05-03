@@ -53,15 +53,7 @@ func NewCacheStore(baseKey []byte) CacheStore {
 }
 
 func LoadMeta(key []byte) (*ObjectMeta, error) {
-	b, err := store.Get(bData, key)
-	if err != nil {
-		return nil, err
-	}
-	if len(b) < 2 { // " {} " 是最小的有效 JSON 对象
-		return nil, nil
-	}
-	var om ObjectMeta
-	return &om, json.Unmarshal(b, &om)
+	return store.GetObject[*ObjectMeta](bData, key)
 }
 
 func SetMeta(key []byte, ll int64, h http.Header, ttl int64) (*ObjectMeta, error) {
