@@ -88,14 +88,14 @@ func (l *httpGeter) Get(url string, reqHeaders http.Header, client *http.Client,
 		if minfo, err = layer.SetMeta(cacheKeyMeta, ll, h, ttl); err != nil { // 存储或序列化失败
 			return b, code, h, err
 		}
-		if start >= ll || end >= ll {
+		if start >= ll {
 			h.Set(cl, "0")
 			h.Del(cr)
 			return &buffer{bytes.NewBuffer([]byte(""))}, http.StatusRequestedRangeNotSatisfiable, h, nil
 		}
 	}
 	var statusCode = http.StatusPartialContent
-	if start >= minfo.Length || end >= minfo.Length {
+	if start >= minfo.Length {
 		return &buffer{bytes.NewBuffer([]byte(""))}, http.StatusRequestedRangeNotSatisfiable, minfo.Header, nil
 	} else if start < 1 && end < 1 {
 		statusCode = http.StatusOK
